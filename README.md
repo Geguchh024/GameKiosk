@@ -19,9 +19,9 @@ A modern, controller-friendly game launcher for Windows. Built with Tauri, React
 
 ## Screenshots
 
-| Main Library | Game Details |
-|--------------|--------------|
-| ![Main](screenshots/main.png) | ![Details](screenshots/details.png) |
+| Main Library 
+|----------------------------|
+| ![Main](screenshots/main.png) 
 
 ## Installation
 
