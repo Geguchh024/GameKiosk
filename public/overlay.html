@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    background: transparent;
+    overflow: hidden;
+    width: 300px;
+    height: 420px;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .panel {
+    width: 280px;
+    margin: 10px;
+    background: rgba(16, 16, 20, 0.95);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    backdrop-filter: blur(20px);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px 12px;
+  }
+  .header-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #e8e8ec;
+    letter-spacing: -0.3px;
+  }
+  .close-btn {
+    width: 24px; height: 24px;
+    display: flex; align-items: center; justify-content: center;
+    color: #55555e; font-size: 14px; cursor: pointer;
+    border-radius: 6px; border: none; background: none;
+    font-family: inherit; transition: all 0.15s;
+  }
+  .close-btn:hover { color: #e8e8ec; background: rgba(255,255,255,0.06); }
+
+  .divider {
+    height: 1px;
+    background: rgba(255,255,255,0.06);
+    margin: 0 16px;
+  }
+
+  .stats {
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .stat-row {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .stat-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .stat-label {
+    font-size: 10px;
+    font-weight: 600;
+    color: #55555e;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  .stat-value {
+    font-size: 13px;
+    font-weight: 700;
+    color: #e8e8ec;
+  }
+  .stat-value .unit {
+    font-size: 10px;
+    font-weight: 500;
+    color: #55555e;
+    margin-left: 2px;
+  }
+  .stat-bar {
+    width: 100%;
+    height: 3px;
+    background: rgba(255,255,255,0.04);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .stat-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.5s ease;
+  }
+  .fill-accent { background: #6c5ce7; }
+  .fill-blue { background: #60a5fa; }
+  .fill-dim { background: #55555e; }
+
+  .divider-thin {
+    height: 1px;
+    background: rgba(255,255,255,0.04);
+    margin: 2px 16px;
+  }
+
+  .actions {
+    padding: 10px 16px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .action-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: transparent;
+    color: #8b8b96;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-align: left;
+    width: 100%;
+  }
+  .action-btn:hover {
+    background: rgba(255,255,255,0.04);
+    color: #e8e8ec;
+  }
+  .action-btn.focused {
+    background: rgba(108,92,231,0.12);
+    border-color: #6c5ce7;
+    color: #e8e8ec;
+  }
+  .action-btn .icon {
+    font-size: 15px;
+    width: 20px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+  .action-btn.primary {
+    background: rgba(108,92,231,0.1);
+    color: #e8e8ec;
+  }
+  .action-btn.primary:hover {
+    background: rgba(108,92,231,0.18);
+  }
+  .action-btn.danger:hover {
+    color: #f87171;
+    background: rgba(248,113,113,0.06);
+  }
+
+  .footer {
+    padding: 8px 16px 10px;
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    font-weight: 600;
+    color: #33333e;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+</style>
+</head>
+<body>
+  <div class="panel">
+    <div class="header">
+      <span class="header-title">GameKiosk</span>
+      <button class="close-btn" id="closeOverlay" title="Close">✕</button>
+    </div>
+    <div class="divider"></div>
+
+    <div class="stats">
+      <div class="stat-row">
+        <div class="stat-header">
+          <span class="stat-label">Frame Rate</span>
+          <span class="stat-value"><span id="fps">---</span><span class="unit">FPS</span></span>
+        </div>
+        <div class="stat-bar"><div class="stat-fill fill-accent" id="fpsBar" style="width:0%"></div></div>
+      </div>
+      <div class="stat-row">
+        <div class="stat-header">
+          <span class="stat-label">Latency</span>
+          <span class="stat-value"><span id="latency">---</span><span class="unit">MS</span></span>
+        </div>
+        <div class="stat-bar"><div class="stat-fill fill-blue" id="latencyBar" style="width:0%"></div></div>
+      </div>
+      <div class="stat-row">
+        <div class="stat-header">
+          <span class="stat-label">GPU Temp</span>
+          <span class="stat-value"><span id="gpuTemp">---</span><span class="unit">°C</span></span>
+        </div>
+        <div class="stat-bar"><div class="stat-fill fill-dim" id="tempBar" style="width:0%"></div></div>
+      </div>
+    </div>
+
+    <div class="divider-thin"></div>
+
+    <div class="actions" id="actionList">
+      <button class="action-btn primary" id="switchBtn" data-idx="0">
+        <span class="icon">⊞</span> Back to GameKiosk
+      </button>
+      <button class="action-btn" id="settingsBtn2" data-idx="1">
+        <span class="icon">⚙</span> Settings
+      </button>
+      <button class="action-btn danger" id="quitBtn" data-idx="2">
+        <span class="icon">⏻</span> Quit
+      </button>
+    </div>
+
+    <div class="footer">
+      <span id="gpuInfo">Detecting GPU...</span>
+      <span><span id="sessionTime">00:00:00</span></span>
+    </div>
+  </div>
+
+<script>
+  function init() {
+    if (!window.__TAURI__) { setTimeout(init, 100); return; }
+    const invoke = window.__TAURI__.core.invoke;
+    const listen = window.__TAURI__.event.listen;
+
+    // Session timer
+    let sessionStart = Date.now();
+    setInterval(() => {
+      const s = Math.floor((Date.now() - sessionStart) / 1000);
+      const h = String(Math.floor(s / 3600)).padStart(2, '0');
+      const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+      const sec = String(s % 60).padStart(2, '0');
+      document.getElementById('sessionTime').textContent = h + ':' + m + ':' + sec;
+    }, 1000);
+
+    // Simulated stats
+    function updateStats() {
+      const fps = Math.floor(120 + Math.random() * 30);
+      const lat = Math.floor(8 + Math.random() * 15);
+      const temp = Math.floor(55 + Math.random() * 15);
+      document.getElementById('fps').textContent = fps;
+      document.getElementById('fpsBar').style.width = Math.min(fps / 240 * 100, 100) + '%';
+      document.getElementById('latency').textContent = lat;
+      document.getElementById('latencyBar').style.width = Math.min(lat / 100 * 100, 100) + '%';
+      document.getElementById('gpuTemp').textContent = temp;
+      document.getElementById('tempBar').style.width = Math.min(temp / 100 * 100, 100) + '%';
+    }
+    updateStats();
+    setInterval(updateStats, 2000);
+
+    // Actions
+    const actions = [
+      { el: document.getElementById('switchBtn'), fn: () => invoke('show_launcher') },
+      { el: document.getElementById('settingsBtn2'), fn: () => invoke('show_launcher') },
+      { el: document.getElementById('quitBtn'), fn: () => invoke('quit_app') },
+    ];
+    let menuIdx = 0;
+
+    function setFocus(i) {
+      menuIdx = Math.max(0, Math.min(actions.length - 1, i));
+      actions.forEach((a, j) => {
+        a.el.classList.toggle('focused', j === menuIdx);
+      });
+    }
+    setFocus(0);
+
+    // Mouse hover
+    actions.forEach((a, i) => {
+      a.el.addEventListener('mouseenter', () => setFocus(i));
+      a.el.addEventListener('click', () => a.fn());
+    });
+
+    document.getElementById('closeOverlay').addEventListener('click', () => invoke('hide_overlay'));
+
+    // Gamepad via Rust gilrs
+    listen('gamepad-button', (event) => {
+      const btn = event.payload;
+      if (btn === 'DPadUp') setFocus(menuIdx - 1);
+      else if (btn === 'DPadDown') setFocus(menuIdx + 1);
+      else if (btn === 'A') actions[menuIdx].fn();
+      else if (btn === 'B' || btn === 'Home') invoke('hide_overlay');
+    });
+
+    // GPU detect
+    try {
+      const c = document.createElement('canvas');
+      const gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+      if (gl) {
+        const ext = gl.getExtension('WEBGL_debug_renderer_info');
+        if (ext) {
+          const r = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL);
+          document.getElementById('gpuInfo').textContent = r.replace(/ANGLE \(|, .*\)/g, '').substring(0, 28);
+        }
+      }
+    } catch(e) {}
+  }
+  init();
+</script>
+</body>
+</html>

@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; }
+  html, body {
+    background: transparent;
+    overflow: hidden;
+    width: 56px;
+    height: 56px;
+  }
+  .fab {
+    width: 56px;
+    height: 56px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    transition: transform 0.15s;
+  }
+  .fab:hover { transform: scale(1.1); }
+  .fab:active { transform: scale(0.95); }
+  .fab img {
+    width: 48px;
+    height: 48px;
+    object-fit: contain;
+    pointer-events: none;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+  }
+</style>
+</head>
+<body>
+  <button class="fab" id="openLauncher" title="Back to GameKiosk">
+    <img src="icon.ico" alt="GameKiosk" />
+  </button>
+  <script>
+    function init() {
+      if (!window.__TAURI__) { setTimeout(init, 100); return; }
+      const invoke = window.__TAURI__.core.invoke;
+      document.getElementById('openLauncher').addEventListener('click', () => {
+        invoke('suspend_game_and_show_launcher');
+      });
+    }
+    init();
+  </script>
+</body>
+</html>

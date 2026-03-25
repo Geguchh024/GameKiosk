@@ -1,0 +1,60 @@
+{
+  "productName": "GameKiosk",
+  "version": "0.1.0",
+  "identifier": "com.gamekiosk.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "GameKiosk",
+        "fullscreen": true,
+        "resizable": true,
+        "decorations": false,
+        "width": 1920,
+        "height": 1080
+      },
+      {
+        "label": "overlay",
+        "title": "",
+        "url": "overlay.html",
+        "width": 300,
+        "height": 420,
+        "x": 10,
+        "y": 58,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false
+      },
+      {
+        "label": "fab",
+        "title": "",
+        "url": "fab.html",
+        "width": 56,
+        "height": 56,
+        "x": 20,
+        "y": 20,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "shadow": false
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "withGlobalTauri": true
+  },
+  "plugins": {}
+}
