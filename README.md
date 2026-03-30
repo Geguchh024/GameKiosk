@@ -12,7 +12,7 @@ A modern, controller-friendly game launcher for Windows. Built with Tauri, React
 - **Multi-Game Switching** - Run multiple games simultaneously, switch between them instantly
 - **Audio Management** - Automatically mutes background games when switching
 - **Floating Action Button** - Transparent overlay icon to return to launcher while gaming
-- **Keyboard Shortcuts** - `Ctrl+Shift+G` or `LB+RB` on controller to return to launcher
+- **Keyboard Shortcuts** - `Ctrl+Shift+G`, `Home/Guide`, or `Select/Back` on controller to return to launcher
 - **Fullscreen Kiosk Mode** - Designed for TV/couch gaming setups
 - **Dark Theme** - Easy on the eyes for gaming sessions
 - **Downloads Browser** - Quick access to your Downloads folder for installing new games
@@ -69,7 +69,8 @@ npm run tauri build
 | X | Edit game |
 | Y | Add new game |
 | LB / RB | Switch tabs |
-| LB + RB (hold both) | Return to GameKiosk |
+| Home / Guide | Return to GameKiosk |
+| Select / Back | Return to GameKiosk (fallback if Guide is captured) |
 
 ### Keyboard Shortcuts
 

@@ -1,12 +1,24 @@
 {
   "productName": "GameKiosk",
   "version": "0.1.0",
-  "identifier": "com.gamekiosk.app",
+  "identifier": "com.gamekiosk.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "icon": ["icons/icon.ico"],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    },
+    "shortDescription": "Controller-friendly game launcher",
+    "longDescription": "A modern, controller-friendly game launcher for Windows with IGDB integration, multi-game switching, and fullscreen kiosk mode."
   },
   "app": {
     "windows": [

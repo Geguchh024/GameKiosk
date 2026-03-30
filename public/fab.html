@@ -6,6 +6,7 @@
   * { margin: 0; padding: 0; }
   html, body {
     background: transparent;
+    -webkit-background-color: transparent;
     overflow: hidden;
     width: 56px;
     height: 56px;
@@ -14,28 +15,46 @@
     width: 56px;
     height: 56px;
     border: none;
+    border-radius: 0;
     background: transparent;
+    backdrop-filter: none;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 0;
-    transition: transform 0.15s;
+    transition: transform 0.15s, background 0.15s;
+    box-shadow: none;
   }
-  .fab:hover { transform: scale(1.1); }
+  .fab:hover {
+    transform: scale(1.08);
+    background: transparent;
+  }
   .fab:active { transform: scale(0.95); }
   .fab img {
-    width: 48px;
-    height: 48px;
+    width: 36px;
+    height: 36px;
     object-fit: contain;
     pointer-events: none;
-    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.45));
+  }
+  .fab-fallback {
+    display: none;
+    color: #fff;
+    font: 700 14px/1 sans-serif;
+    letter-spacing: 0.5px;
+    pointer-events: none;
   }
 </style>
 </head>
 <body>
-  <button class="fab" id="openLauncher" title="Back to GameKiosk">
-    <img src="icon.ico" alt="GameKiosk" />
+  <button class="fab" id="openLauncher" title="Back to GameKiosk (Home or Select)">
+    <img
+      src="icon.ico"
+      alt="GameKiosk"
+      onerror="this.style.display='none'; document.getElementById('fabFallback').style.display='inline';"
+    />
+    <span class="fab-fallback" id="fabFallback">GK</span>
   </button>
   <script>
     function init() {

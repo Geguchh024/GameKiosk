@@ -1,17 +1,43 @@
 use gilrs::{Button, EventType, Gilrs};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command as StdCommand;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use sysinfo::System;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tokio::sync::Mutex;
+
+/// File logger that writes to gamekiosk_debug.log next to the executable
+fn log(msg: &str) {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut targets: HashSet<PathBuf> = HashSet::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            targets.insert(parent.join("gamekiosk_debug.log"));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        targets.insert(cwd.join("gamekiosk_debug.log"));
+    }
+    targets.insert(std::env::temp_dir().join("gamekiosk_debug.log"));
+
+    for log_path in targets {
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+            let _ = writeln!(f, "[{}] {}", timestamp, msg);
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Program {
@@ -43,19 +69,74 @@ fn get_settings_path(app: &tauri::AppHandle) -> PathBuf {
     get_data_dir(app).join("settings.json")
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+const TRAY_MOUSE_SPEED_MIN: f32 = 0.2;
+const TRAY_MOUSE_SPEED_MAX: f32 = 1.5;
+const TRAY_MOUSE_SPEED_DEFAULT: f32 = 0.6;
+const TRAY_MOUSE_ENABLED_DEFAULT: bool = true;
+
+fn default_tray_mouse_speed() -> f32 {
+    TRAY_MOUSE_SPEED_DEFAULT
+}
+
+fn clamp_tray_mouse_speed(speed: f32) -> f32 {
+    speed.clamp(TRAY_MOUSE_SPEED_MIN, TRAY_MOUSE_SPEED_MAX)
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppSettings {
     #[serde(default)]
     pub igdb_client_id: String,
     #[serde(default)]
     pub igdb_client_secret: String,
+    #[serde(default = "default_tray_mouse_speed")]
+    pub tray_mouse_speed: f32,
+    #[serde(default = "default_tray_mouse_enabled")]
+    pub tray_mouse_enabled: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            igdb_client_id: String::new(),
+            igdb_client_secret: String::new(),
+            tray_mouse_speed: TRAY_MOUSE_SPEED_DEFAULT,
+            tray_mouse_enabled: TRAY_MOUSE_ENABLED_DEFAULT,
+        }
+    }
+}
+
+fn default_tray_mouse_enabled() -> bool {
+    TRAY_MOUSE_ENABLED_DEFAULT
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TrayMouseConfig {
+    speed: f32,
+    enabled: bool,
+}
+
+struct TrayMouseConfigState {
+    config: std::sync::Mutex<TrayMouseConfig>,
+}
+
+struct TrayMouseToggleState {
+    last_toggle_ms: AtomicU64,
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn load_settings(app: &tauri::AppHandle) -> AppSettings {
     let path = get_settings_path(app);
     if path.exists() {
         let data = fs::read_to_string(&path).unwrap_or_default();
-        serde_json::from_str(&data).unwrap_or_default()
+        let mut settings: AppSettings = serde_json::from_str(&data).unwrap_or_default();
+        settings.tray_mouse_speed = clamp_tray_mouse_speed(settings.tray_mouse_speed);
+        settings
     } else {
         AppSettings::default()
     }
@@ -87,7 +168,10 @@ fn save_programs(app: &tauri::AppHandle, programs: &[Program]) {
 
 #[tauri::command]
 fn get_programs(app: tauri::AppHandle) -> Vec<Program> {
-    load_programs(&app)
+    log("cmd: get_programs called");
+    let programs = load_programs(&app);
+    log(&format!("cmd: get_programs returning {} programs", programs.len()));
+    programs
 }
 
 #[tauri::command]
@@ -193,26 +277,27 @@ fn launch_program(app: tauri::AppHandle, path: String, program_id: Option<String
             }
 
             if let Some(pid) = found_pid {
-                let state = app_clone.state::<RunningGamesState>();
-                let mut games = state.games.lock().unwrap();
+                if let Some(state) = app_clone.try_state::<RunningGamesState>() {
+                    let mut games = state.games.lock().unwrap();
 
-                // Mute all other running games
-                for entry in games.values_mut() {
-                    entry.active = false;
-                    entry.muted = true;
-                    set_process_mute(entry.pid, true);
+                    // Mute all other running games
+                    for entry in games.values_mut() {
+                        entry.active = false;
+                        entry.muted = true;
+                        set_process_mute(entry.pid, true);
+                    }
+
+                    games.insert(pid_str_clone.clone(), RunningGameEntry {
+                        program_id: pid_str_clone,
+                        program_name: p_name,
+                        pid,
+                        exe_path,
+                        active: true,
+                        muted: false,
+                    });
+                    println!("[running] Tracking game PID {}", pid);
+                    app_clone.emit("running-games-changed", ()).ok();
                 }
-
-                games.insert(pid_str_clone.clone(), RunningGameEntry {
-                    program_id: pid_str_clone,
-                    program_name: p_name,
-                    pid,
-                    exe_path,
-                    active: true,
-                    muted: false,
-                });
-                println!("[running] Tracking game PID {}", pid);
-                app_clone.emit("running-games-changed", ()).ok();
             } else {
                 println!("[running] Could not find process for {}", exe_path);
             }
@@ -231,11 +316,8 @@ fn launch_program(app: tauri::AppHandle, path: String, program_id: Option<String
     }
     if let Some(fab) = app.get_webview_window("fab") {
         println!("[launch] Showing fab window");
-        if let Err(e) = fab.show() {
+        if let Err(e) = show_fab_window(&fab) {
             println!("[launch] ERROR showing fab: {}", e);
-        }
-        if let Err(e) = fab.set_focus() {
-            println!("[launch] ERROR focusing fab: {}", e);
         }
         if let Ok(pos) = fab.outer_position() {
             println!("[launch] fab position: {:?}", pos);
@@ -246,6 +328,15 @@ fn launch_program(app: tauri::AppHandle, path: String, program_id: Option<String
     } else {
         println!("[launch] ERROR: fab window not found");
     }
+
+    // Re-assert topmost shortly after launch because many games switch to fullscreen after startup.
+    let app_for_fab = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(900));
+        if let Some(fab) = app_for_fab.get_webview_window("fab") {
+            show_fab_window(&fab).ok();
+        }
+    });
 
     Ok("Program launched".to_string())
 }
@@ -264,14 +355,14 @@ fn show_launcher(app: tauri::AppHandle) -> Result<(), String> {
         window.set_fullscreen(true).ok();
         window.set_focus().map_err(|e| e.to_string())?;
     }
+    app.emit("launcher-shown", ()).ok();
     Ok(())
 }
 
 #[tauri::command]
 fn suspend_game_and_show_launcher(app: tauri::AppHandle) -> Result<(), String> {
     // Mute all running games (suspend audio)
-    let state = app.state::<RunningGamesState>();
-    {
+    if let Some(state) = app.try_state::<RunningGamesState>() {
         let mut games = state.games.lock().unwrap();
         for entry in games.values_mut() {
             entry.active = false;
@@ -294,6 +385,7 @@ fn suspend_game_and_show_launcher(app: tauri::AppHandle) -> Result<(), String> {
         window.set_fullscreen(true).ok();
         window.set_focus().map_err(|e| e.to_string())?;
     }
+    app.emit("launcher-shown", ()).ok();
     Ok(())
 }
 
@@ -305,8 +397,7 @@ fn hide_launcher(app: tauri::AppHandle) -> Result<(), String> {
         window.hide().map_err(|e| e.to_string())?;
     }
     if let Some(fab) = app.get_webview_window("fab") {
-        fab.show().ok();
-        fab.set_focus().ok();
+        show_fab_window(&fab).ok();
     }
     Ok(())
 }
@@ -317,7 +408,7 @@ fn show_overlay(app: tauri::AppHandle) -> Result<(), String> {
         fab.hide().ok();
     }
     if let Some(overlay) = app.get_webview_window("overlay") {
-        overlay.show().map_err(|e| e.to_string())?;
+        show_overlay_window(&overlay)?;
         overlay.set_focus().ok();
     }
     if let Some(state) = app.try_state::<OverlayState>() {
@@ -332,7 +423,7 @@ fn hide_overlay(app: tauri::AppHandle) -> Result<(), String> {
         overlay.hide().map_err(|e| e.to_string())?;
     }
     if let Some(fab) = app.get_webview_window("fab") {
-        fab.show().ok();
+        show_fab_window(&fab).ok();
     }
     if let Some(state) = app.try_state::<OverlayState>() {
         state.visible.store(false, Ordering::SeqCst);
@@ -355,7 +446,10 @@ fn toggle_overlay_cmd(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn get_settings(app: tauri::AppHandle) -> AppSettings {
-    load_settings(&app)
+    log("cmd: get_settings called");
+    let settings = load_settings(&app);
+    log(&format!("cmd: get_settings returning (igdb configured: {})", !settings.igdb_client_id.is_empty()));
+    settings
 }
 
 /* ── Downloads folder listing ── */
@@ -537,6 +631,226 @@ fn clear_window_effects(window: &tauri::WebviewWindow) {
 #[cfg(not(target_os = "windows"))]
 fn clear_window_effects(_window: &tauri::WebviewWindow) {}
 
+#[cfg(target_os = "windows")]
+fn force_window_topmost(window: &tauri::WebviewWindow) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    };
+
+    if let Ok(webview) = window.as_ref().window().hwnd() {
+        unsafe {
+            let hwnd = HWND(webview.0 as *mut std::ffi::c_void);
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn force_window_topmost(_window: &tauri::WebviewWindow) {}
+
+fn show_fab_window(fab: &tauri::WebviewWindow) -> Result<(), String> {
+    fab.show().map_err(|e| e.to_string())?;
+    fab.set_always_on_top(true).ok();
+    force_window_topmost(fab);
+    Ok(())
+}
+
+fn show_overlay_window(overlay: &tauri::WebviewWindow) -> Result<(), String> {
+    overlay.show().map_err(|e| e.to_string())?;
+    overlay.set_always_on_top(true).ok();
+    force_window_topmost(overlay);
+    Ok(())
+}
+
+fn is_launcher_active(app: &tauri::AppHandle) -> bool {
+    let main_visible = app
+        .get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+
+    let main_minimized = app
+        .get_webview_window("main")
+        .and_then(|w| w.is_minimized().ok())
+        .unwrap_or(false);
+
+    let fab_visible = app
+        .get_webview_window("fab")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+
+    let overlay_visible = app
+        .get_webview_window("overlay")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+
+    main_visible && !main_minimized && !fab_visible && !overlay_visible
+}
+
+fn is_overlay_visible(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window("overlay")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
+}
+
+fn should_forward_gamepad_to_ui(app: &tauri::AppHandle) -> bool {
+    is_launcher_active(app) || is_overlay_visible(app)
+}
+
+fn current_tray_mouse_speed(app: &tauri::AppHandle) -> f32 {
+    app.try_state::<TrayMouseConfigState>()
+        .map(|state| {
+            let cfg = state.config.lock().unwrap();
+            cfg.speed
+        })
+        .unwrap_or(TRAY_MOUSE_SPEED_DEFAULT)
+}
+
+fn is_tray_mouse_enabled(app: &tauri::AppHandle) -> bool {
+    app.try_state::<TrayMouseConfigState>()
+        .map(|state| {
+            let cfg = state.config.lock().unwrap();
+            cfg.enabled
+        })
+        .unwrap_or(TRAY_MOUSE_ENABLED_DEFAULT)
+}
+
+fn toggle_tray_mouse_enabled(app: &tauri::AppHandle) -> bool {
+    let mut enabled = TRAY_MOUSE_ENABLED_DEFAULT;
+
+    if let Some(state) = app.try_state::<TrayMouseConfigState>() {
+        let mut cfg = state.config.lock().unwrap();
+        cfg.enabled = !cfg.enabled;
+        enabled = cfg.enabled;
+    }
+
+    let mut settings = load_settings(app);
+    settings.tray_mouse_enabled = enabled;
+    save_settings(app, &settings);
+
+    app.emit("tray-mouse-enabled-changed", enabled).ok();
+    log(&format!("[tray-mouse] enabled set to {}", enabled));
+    enabled
+}
+
+fn request_toggle_tray_mouse_enabled(app: &tauri::AppHandle) -> bool {
+    const TOGGLE_DEBOUNCE_MS: u64 = 250;
+    let now = now_millis();
+
+    if let Some(state) = app.try_state::<TrayMouseToggleState>() {
+        let last = state.last_toggle_ms.load(Ordering::SeqCst);
+        if now.saturating_sub(last) < TOGGLE_DEBOUNCE_MS {
+            return is_tray_mouse_enabled(app);
+        }
+        state.last_toggle_ms.store(now, Ordering::SeqCst);
+    }
+
+    toggle_tray_mouse_enabled(app)
+}
+
+fn is_tray_mouse_control_active(app: &tauri::AppHandle) -> bool {
+    if should_forward_gamepad_to_ui(app) {
+        return false;
+    }
+    if !is_tray_mouse_enabled(app) {
+        return false;
+    }
+
+    app.get_webview_window("main")
+        .map(|w| {
+            let visible = w.is_visible().ok().unwrap_or(false);
+            let minimized = w.is_minimized().ok().unwrap_or(false);
+            !visible || minimized
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn tray_move_mouse_from_stick(lx: f32, ly: f32, speed_scale: f32) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
+
+    const DEADZONE: f32 = 0.2;
+    const BASE_MAX_SPEED: f32 = 10.0;
+    let max_speed = BASE_MAX_SPEED * clamp_tray_mouse_speed(speed_scale);
+
+    let scaled = |v: f32| -> f32 {
+        if v.abs() <= DEADZONE {
+            return 0.0;
+        }
+        let normalized = ((v.abs() - DEADZONE) / (1.0 - DEADZONE)).clamp(0.0, 1.0);
+        let curve = normalized.powf(1.4);
+        v.signum() * curve * max_speed
+    };
+
+    let dx = scaled(lx).round() as i32;
+    // gilrs Y axis is positive when pushing up; screen Y is negative when moving up.
+    let dy = (-scaled(ly)).round() as i32;
+
+    if dx == 0 && dy == 0 {
+        return;
+    }
+
+    unsafe {
+        let mut pos = POINT { x: 0, y: 0 };
+        if GetCursorPos(&mut pos).is_ok() {
+            let _ = SetCursorPos(pos.x + dx, pos.y + dy);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn tray_move_mouse_from_stick(_lx: f32, _ly: f32, _speed_scale: f32) {}
+
+#[cfg(target_os = "windows")]
+fn tray_left_click() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
+    };
+
+    let down = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_LEFTDOWN,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let up = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_LEFTUP,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+
+    unsafe {
+        let _ = SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn tray_left_click() {}
+
 fn find_process_pid(exe_path: &str) -> Option<u32> {
     // Try exact exe name match first
     let exe_name = std::path::Path::new(exe_path)
@@ -667,7 +981,10 @@ fn running_games_to_info(games: &HashMap<String, RunningGameEntry>) -> Vec<Runni
 
 #[tauri::command]
 fn get_running_games(app: tauri::AppHandle) -> Vec<RunningGameInfo> {
-    let state = app.state::<RunningGamesState>();
+    let state = match app.try_state::<RunningGamesState>() {
+        Some(s) => s,
+        None => return vec![],
+    };
     let mut games = state.games.lock().unwrap();
     let mut sys = System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
@@ -690,7 +1007,7 @@ fn get_running_games(app: tauri::AppHandle) -> Vec<RunningGameInfo> {
 
 #[tauri::command]
 fn switch_to_game(app: tauri::AppHandle, program_id: String) -> Result<Vec<RunningGameInfo>, String> {
-    let state = app.state::<RunningGamesState>();
+    let state = app.try_state::<RunningGamesState>().ok_or("State not ready")?;
     let mut games = state.games.lock().unwrap();
 
     let target_pid = games.get(&program_id).map(|e| e.pid);
@@ -719,7 +1036,7 @@ fn switch_to_game(app: tauri::AppHandle, program_id: String) -> Result<Vec<Runni
         window.hide().ok();
     }
     if let Some(fab) = app.get_webview_window("fab") {
-        fab.show().ok();
+        show_fab_window(&fab).ok();
     }
 
     Ok(running_games_to_info(&games))
@@ -727,7 +1044,10 @@ fn switch_to_game(app: tauri::AppHandle, program_id: String) -> Result<Vec<Runni
 
 #[tauri::command]
 fn close_game(app: tauri::AppHandle, program_id: String) -> Vec<RunningGameInfo> {
-    let state = app.state::<RunningGamesState>();
+    let state = match app.try_state::<RunningGamesState>() {
+        Some(s) => s,
+        None => return vec![],
+    };
     let mut games = state.games.lock().unwrap();
 
     if let Some(entry) = games.remove(&program_id) {
@@ -754,6 +1074,20 @@ fn save_igdb_credentials(
     settings.igdb_client_id = client_id;
     settings.igdb_client_secret = client_secret;
     save_settings(&app, &settings);
+    settings
+}
+
+#[tauri::command]
+fn save_tray_mouse_settings(app: tauri::AppHandle, speed: f32) -> AppSettings {
+    let mut settings = load_settings(&app);
+    settings.tray_mouse_speed = clamp_tray_mouse_speed(speed);
+    save_settings(&app, &settings);
+
+    if let Some(state) = app.try_state::<TrayMouseConfigState>() {
+        let mut cfg = state.config.lock().unwrap();
+        cfg.speed = settings.tray_mouse_speed;
+    }
+
     settings
 }
 
@@ -1085,65 +1419,50 @@ fn start_gamepad_thread(app_handle: tauri::AppHandle) {
         // Track previous axis values for edge-triggered stick events
         let mut prev_lx: f32 = 0.0;
         let mut prev_ly: f32 = 0.0;
+        let mut tray_lx: f32 = 0.0;
+        let mut tray_ly: f32 = 0.0;
+        let mut tray_rx: f32 = 0.0;
+        let mut tray_ry: f32 = 0.0;
         let deadzone: f32 = 0.5;
         let mut axis_cooldown = std::time::Instant::now();
         
-        // Track bumper states for LB+RB combo
-        let mut lb_held = false;
-        let mut rb_held = false;
         loop {
             while let Some(event) = gilrs.next_event() {
                 match event.event {
                     EventType::ButtonPressed(button, _) => {
                         println!("[gamepad] Button pressed: {:?}", button);
+                        log(&format!("[gamepad] Button pressed: {:?}", button));
 
-                        // Track bumper presses for LB+RB combo
-                        if button == Button::LeftTrigger {
-                            lb_held = true;
-                        }
-                        if button == Button::RightTrigger {
-                            rb_held = true;
+                        // Toggle tray mouse controls globally.
+                        if button == Button::Start {
+                            request_toggle_tray_mouse_enabled(&app_handle);
+                            continue;
                         }
 
-                        // LB + RB combo OR Guide/Home button suspends game and shows launcher
-                        if (lb_held && rb_held) || button == Button::Mode {
-                            println!("[gamepad] LB+RB or Guide pressed — suspending game and showing launcher");
-                            let main_visible = app_handle
-                                .get_webview_window("main")
-                                .and_then(|w| w.is_visible().ok())
-                                .unwrap_or(false);
-                            
-                            if main_visible {
-                                // Already in launcher, do nothing
+                        // Home/Guide and Select/Back can return to launcher from an active game.
+                        if button == Button::Mode || button == Button::Select {
+                            let trigger = if button == Button::Mode { "Home/Guide" } else { "Select/Back" };
+                            println!("[gamepad] {} pressed - suspending game and showing launcher", trigger);
+                            log(&format!("[gamepad] {} return branch hit", trigger));
+                            if is_launcher_active(&app_handle) {
+                                // Keep Select available for in-launcher actions.
+                                if button == Button::Select {
+                                    app_handle.emit("gamepad-button", "Select").ok();
+                                }
                                 continue;
                             }
 
-                            // Suspend all running games (mute audio)
-                            if let Some(state) = app_handle.try_state::<RunningGamesState>() {
-                                let mut games = state.games.lock().unwrap();
-                                for entry in games.values_mut() {
-                                    entry.active = false;
-                                    entry.muted = true;
-                                    set_process_mute(entry.pid, true);
-                                }
-                            }
-                            app_handle.emit("running-games-changed", ()).ok();
-
-                            // Hide overlay and FAB, show main launcher
-                            if let Some(overlay) = app_handle.get_webview_window("overlay") {
-                                overlay.hide().ok();
-                            }
-                            if let Some(fab) = app_handle.get_webview_window("fab") {
-                                fab.hide().ok();
-                            }
-                            if let Some(window) = app_handle.get_webview_window("main") {
-                                window.show().ok();
-                                window.unminimize().ok();
-                                window.set_fullscreen(true).ok();
-                                window.set_focus().ok();
-                            }
+                            suspend_game_and_show_launcher(app_handle.clone()).ok();
                             if let Some(state) = app_handle.try_state::<OverlayState>() {
                                 state.visible.store(false, Ordering::SeqCst);
+                            }
+                            continue;
+                        }
+
+                        // Do not drive hidden launcher UI while a game has focus.
+                        if !should_forward_gamepad_to_ui(&app_handle) {
+                            if button == Button::South && is_tray_mouse_control_active(&app_handle) {
+                                tray_left_click();
                             }
                             continue;
                         }
@@ -1161,22 +1480,27 @@ fn start_gamepad_thread(app_handle: tauri::AppHandle) {
                             Button::RightTrigger => "RB",
                             Button::LeftTrigger2 => "LT",
                             Button::RightTrigger2 => "RT",
-                            Button::Select => "Select",
-                            Button::Start => "Start",
                             _ => continue,
                         };
                         app_handle.emit("gamepad-button", button_name).ok();
                     }
-                    EventType::ButtonReleased(button, _) => {
-                        // Track bumper releases for LB+RB combo
-                        if button == Button::LeftTrigger {
-                            lb_held = false;
-                        }
-                        if button == Button::RightTrigger {
-                            rb_held = false;
-                        }
-                    }
                     EventType::AxisChanged(axis, value, _) => {
+                        match axis {
+                            gilrs::Axis::LeftStickX => tray_lx = value,
+                            gilrs::Axis::LeftStickY => tray_ly = value,
+                            gilrs::Axis::RightStickX => tray_rx = value,
+                            gilrs::Axis::RightStickY => tray_ry = value,
+                            _ => {}
+                        }
+
+                        if !should_forward_gamepad_to_ui(&app_handle) {
+                            match axis {
+                                gilrs::Axis::LeftStickX => prev_lx = value,
+                                gilrs::Axis::LeftStickY => prev_ly = value,
+                                _ => {}
+                            }
+                            continue;
+                        }
                         if axis_cooldown.elapsed() < std::time::Duration::from_millis(150) {
                             // Update tracked values but don't emit
                             match axis {
@@ -1218,22 +1542,115 @@ fn start_gamepad_thread(app_handle: tauri::AppHandle) {
                     _ => {}
                 }
             }
+
+            if is_tray_mouse_control_active(&app_handle) {
+                let tray_speed = current_tray_mouse_speed(&app_handle);
+                let left_mag = tray_lx.abs().max(tray_ly.abs());
+                let right_mag = tray_rx.abs().max(tray_ry.abs());
+                if right_mag > left_mag {
+                    tray_move_mouse_from_stick(tray_rx, tray_ry, tray_speed);
+                } else {
+                    tray_move_mouse_from_stick(tray_lx, tray_ly, tray_speed);
+                }
+            }
+
             std::thread::sleep(std::time::Duration::from_millis(16));
         }
     });
 }
 
+#[cfg(target_os = "windows")]
+fn start_xinput_return_button_thread(app_handle: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        use windows::Win32::UI::Input::XboxController::{
+            XINPUT_GAMEPAD_BUTTON_FLAGS, XINPUT_STATE, XInputGetState,
+        };
+
+        const XINPUT_BACK_MASK: XINPUT_GAMEPAD_BUTTON_FLAGS = XINPUT_GAMEPAD_BUTTON_FLAGS(0x0020);
+        const XINPUT_A_MASK: XINPUT_GAMEPAD_BUTTON_FLAGS = XINPUT_GAMEPAD_BUTTON_FLAGS(0x1000);
+        const XINPUT_START_MASK: XINPUT_GAMEPAD_BUTTON_FLAGS = XINPUT_GAMEPAD_BUTTON_FLAGS(0x0010);
+        let mut was_back_down = [false; 4];
+        let mut was_a_down = [false; 4];
+        let mut was_start_down = [false; 4];
+        log("[xinput] return-button polling started");
+
+        loop {
+            for user_index in 0..4u32 {
+                let idx = user_index as usize;
+                let mut state = XINPUT_STATE::default();
+                if unsafe { XInputGetState(user_index, &mut state) } == 0 {
+                    let start_down = (state.Gamepad.wButtons & XINPUT_START_MASK).0 != 0;
+                    if start_down && !was_start_down[idx] {
+                        request_toggle_tray_mouse_enabled(&app_handle);
+                    }
+                    was_start_down[idx] = start_down;
+
+                    if is_tray_mouse_control_active(&app_handle) {
+                        let tray_speed = current_tray_mouse_speed(&app_handle);
+                        // Polling fallback: keep tray mouse controls responsive even when gilrs
+                        // axis/button events don't update while the launcher is hidden.
+                        let normalize = |raw: i16| -> f32 {
+                            if raw >= 0 {
+                                (raw as f32 / 32767.0).clamp(-1.0, 1.0)
+                            } else {
+                                (raw as f32 / 32768.0).clamp(-1.0, 1.0)
+                            }
+                        };
+
+                        let lx = normalize(state.Gamepad.sThumbLX);
+                        let ly = normalize(state.Gamepad.sThumbLY);
+                        let rx = normalize(state.Gamepad.sThumbRX);
+                        let ry = normalize(state.Gamepad.sThumbRY);
+
+                        let left_mag = lx.abs().max(ly.abs());
+                        let right_mag = rx.abs().max(ry.abs());
+                        if right_mag > left_mag {
+                            tray_move_mouse_from_stick(rx, ry, tray_speed);
+                        } else {
+                            tray_move_mouse_from_stick(lx, ly, tray_speed);
+                        }
+
+                        let a_down = (state.Gamepad.wButtons & XINPUT_A_MASK).0 != 0;
+                        if a_down && !was_a_down[idx] {
+                            tray_left_click();
+                        }
+                        was_a_down[idx] = a_down;
+                    } else {
+                        was_a_down[idx] = false;
+                    }
+
+                    let back_down = (state.Gamepad.wButtons & XINPUT_BACK_MASK).0 != 0;
+                    if back_down && !was_back_down[idx] {
+                        log(&format!("[xinput] BACK pressed on controller {}", user_index));
+                        if is_launcher_active(&app_handle) {
+                            app_handle.emit("gamepad-button", "Select").ok();
+                        } else {
+                            suspend_game_and_show_launcher(app_handle.clone()).ok();
+                            if let Some(state) = app_handle.try_state::<OverlayState>() {
+                                state.visible.store(false, Ordering::SeqCst);
+                            }
+                        }
+                    }
+                    was_back_down[idx] = back_down;
+                } else {
+                    was_back_down[idx] = false;
+                    was_a_down[idx] = false;
+                    was_start_down[idx] = false;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(16));
+        }
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn start_xinput_return_button_thread(_app_handle: tauri::AppHandle) {}
+
 fn toggle_overlay(app: &tauri::AppHandle, overlay_visible: &Arc<AtomicBool>) {
     let is_visible = overlay_visible.load(Ordering::SeqCst);
     println!("[hotkey] Toggle overlay. Currently visible: {}", is_visible);
 
-    // Check if main window is visible
-    let main_visible = app
-        .get_webview_window("main")
-        .and_then(|w| w.is_visible().ok())
-        .unwrap_or(false);
-
-    if main_visible {
+    if is_launcher_active(app) {
         // Main is visible, do nothing (user is already in launcher)
         return;
     }
@@ -1261,6 +1678,7 @@ fn toggle_overlay(app: &tauri::AppHandle, overlay_visible: &Arc<AtomicBool>) {
         window.set_fullscreen(true).ok();
         window.set_focus().ok();
     }
+    app.emit("launcher-shown", ()).ok();
     overlay_visible.store(false, Ordering::SeqCst);
 }
 
@@ -1269,49 +1687,92 @@ struct OverlayState {
 }
 
 pub fn run() {
+    // Log panics to file (release builds hide the console)
+    std::panic::set_hook(Box::new(|info| {
+        log(&format!("PANIC: {}", info));
+    }));
+
+    log("=== GameKiosk starting ===");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
+            log("setup: entered");
+
             // IGDB token cache
             app.manage(IgdbTokenCache {
                 token: Mutex::new(None),
                 http: Client::new(),
             });
+            log("setup: igdb token cache created");
 
             // Running games tracker
             app.manage(RunningGamesState {
                 games: std::sync::Mutex::new(HashMap::new()),
             });
+            log("setup: running games state created");
 
             // Overlay visibility state
             let overlay_visible = Arc::new(AtomicBool::new(false));
             app.manage(OverlayState {
                 visible: overlay_visible.clone(),
             });
+            log("setup: overlay state created");
+
+            // Tray mouse runtime config
+            let initial_settings = load_settings(&app.handle().clone());
+            app.manage(TrayMouseConfigState {
+                config: std::sync::Mutex::new(TrayMouseConfig {
+                    speed: initial_settings.tray_mouse_speed,
+                    enabled: initial_settings.tray_mouse_enabled,
+                }),
+            });
+            app.manage(TrayMouseToggleState {
+                last_toggle_ms: AtomicU64::new(0),
+            });
+            log(&format!(
+                "setup: tray mouse config loaded (speed {:.2}, enabled {})",
+                initial_settings.tray_mouse_speed,
+                initial_settings.tray_mouse_enabled
+            ));
 
             // Clear window effects (remove Windows 11 rounded corners and backdrop) for FAB and overlay
             if let Some(fab) = app.get_webview_window("fab") {
+                log("setup: clearing fab window effects");
                 clear_window_effects(&fab);
+            } else {
+                log("setup: fab window not found");
             }
             if let Some(overlay) = app.get_webview_window("overlay") {
+                log("setup: clearing overlay window effects");
                 clear_window_effects(&overlay);
+            } else {
+                log("setup: overlay window not found");
             }
 
             // Global hotkey: Ctrl+Shift+G toggles overlay (works even when game has focus)
+            log("setup: registering global shortcut");
             let app_handle = app.handle().clone();
             let ov = overlay_visible.clone();
-            app.global_shortcut().on_shortcut("Ctrl+Shift+G", move |_app, _shortcut, _event| {
+            if let Err(e) = app.global_shortcut().on_shortcut("Ctrl+Shift+G", move |_app, _shortcut, _event| {
                 toggle_overlay(&app_handle, &ov);
-            }).expect("failed to register global shortcut");
-            println!("[hotkey] Registered Ctrl+Shift+G for overlay toggle");
+            }) {
+                log(&format!("setup: FAILED to register hotkey: {}", e));
+            } else {
+                log("setup: hotkey registered");
+            }
 
             // System tray
-            let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().cloned().unwrap())
-                .tooltip("GameKiosk - Ctrl+Shift+G or LB+RB")
-                .on_tray_icon_event(|tray, event| {
+            log("setup: creating system tray");
+            let tray_icon = app.default_window_icon().cloned();
+            if let Some(icon) = tray_icon {
+                log("setup: building tray icon");
+                let _tray = TrayIconBuilder::new()
+                    .icon(icon)
+                    .tooltip("GameKiosk - Ctrl+Shift+G or Home")
+                    .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
@@ -1334,10 +1795,18 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+                log("setup: tray icon built");
+            } else {
+                log("setup: no default window icon for tray");
+            }
 
             // Gamepad thread for overlay menu navigation (D-pad, A, B)
+            log("setup: starting gamepad thread");
             start_gamepad_thread(app.handle().clone());
+            log("setup: starting xinput return-button thread");
+            start_xinput_return_button_thread(app.handle().clone());
 
+            log("setup: complete");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1355,6 +1824,7 @@ pub fn run() {
             quit_app,
             get_settings,
             save_igdb_credentials,
+            save_tray_mouse_settings,
             igdb_validate,
             igdb_search,
             igdb_popular,
@@ -1366,5 +1836,8 @@ pub fn run() {
             close_game,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .unwrap_or_else(|e| {
+            log(&format!("FATAL: tauri app failed to run: {}", e));
+        });
+    log("=== GameKiosk exited ===");
 }

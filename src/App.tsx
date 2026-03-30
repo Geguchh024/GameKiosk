@@ -8,6 +8,20 @@ import { getCachedImage, cacheImage } from "./imageCache";
 import type { Program, TabFilter, NavItem } from "./types";
 
 type RunningGame = { program_id: string; program_name: string; pid: number; exe_path: string; active: boolean; muted: boolean };
+type AppSettings = {
+  igdb_client_id: string;
+  igdb_client_secret: string;
+  tray_mouse_speed?: number;
+  tray_mouse_enabled?: boolean;
+};
+
+const TRAY_MOUSE_SPEED_MIN = 0.2;
+const TRAY_MOUSE_SPEED_MAX = 1.5;
+const TRAY_MOUSE_SPEED_STEP = 0.05;
+
+function clampTrayMouseSpeed(speed: number): number {
+  return Math.min(TRAY_MOUSE_SPEED_MAX, Math.max(TRAY_MOUSE_SPEED_MIN, Number(speed.toFixed(2))));
+}
 
 /** Map Rust snake_case fields to frontend camelCase */
 function normalizePrograms(raw: Program[]): Program[] {
@@ -26,9 +40,16 @@ function formatFileSize(bytes: number): string {
 }
 
 /* ── Focus zones for controller navigation ── */
-type FocusZone = "sidebar" | "tabs" | "grid";
+type FocusZone = "sidebar" | "running" | "tabs" | "grid";
+type OnboardingStep = {
+  title: string;
+  body: string;
+  points: string[];
+};
 
 const COLUMNS = 4;
+const SPLASH_DURATION_MS = 1600;
+const ONBOARDING_STORAGE_KEY = "gamekiosk.onboardingComplete";
 
 const COVER_GRADIENTS = [
   "linear-gradient(135deg, #1a1a2e, #2d2d44)",
@@ -62,8 +83,40 @@ const TABS: { id: TabFilter; label: string }[] = [
   { id: "recent", label: "Recent" },
 ];
 
+const ONBOARDING_STEPS: OnboardingStep[] = [
+  {
+    title: "Import your library",
+    body: "GameKiosk keeps your games in one place so you can launch fast without leaving fullscreen mode.",
+    points: [
+      "Use Add Game to browse for .exe, .lnk, .bat, .cmd, .url, or appref-ms files.",
+      "Right-click a game or press E to edit its name and cover art.",
+    ],
+  },
+  {
+    title: "Move with keyboard or controller",
+    body: "The UI is built for both mouse and couch navigation, with quick shortcuts for the most common actions.",
+    points: [
+      "Keyboard: / search, Tab switch zones, F favorite, Del remove, Enter launch.",
+      "Controller: LB/RB switch sections, LT/RT switch tabs, A launch, B back.",
+    ],
+  },
+  {
+    title: "Tune the look and metadata",
+    body: "Personalize the theme and connect IGDB when you want richer cover art and the store browser.",
+    points: [
+      "Open Settings to change the theme or turn controller mode on and off.",
+      "Set up IGDB to fetch cover art and browse popular games from the store tab.",
+    ],
+  },
+];
+
 function App() {
   const [programs, setPrograms] = useState<Program[]>([]);
+  const [showSplash, setShowSplash] = useState(true);
+  const [showOnboarding, setShowOnboarding] = useState(
+    () => localStorage.getItem(ONBOARDING_STORAGE_KEY) !== "true"
+  );
+  const [onboardingStep, setOnboardingStep] = useState(0);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [launching, setLaunching] = useState(false);
   const [message, setMessage] = useState("");
@@ -78,13 +131,15 @@ function App() {
   const STORE_PAGE_SIZE = 20;
   const [controllerMode, setControllerMode] = useState(() => localStorage.getItem("controllerMode") === "true");
   const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem("theme") as Theme) || "obsidian");
+  const [trayMouseSpeed, setTrayMouseSpeed] = useState(0.6);
+  const [trayMouseEnabled, setTrayMouseEnabled] = useState(true);
   const [focusZone, setFocusZone] = useState<FocusZone>("grid");
   const [sidebarIndex, setSidebarIndex] = useState(0);
   const [tabIndex, setTabIndex] = useState(0);
 
   // Settings controller navigation
   const [settingsIndex, setSettingsIndex] = useState(0);
-  const SETTINGS_ITEMS = 4; // Theme, Controller Mode, IGDB API, Library Stats
+  const SETTINGS_ITEMS = 6; // Theme, Controller Mode, Tray Cursor Speed, IGDB API, Library Stats, Application
 
   // Downloads state
   const [downloadEntries, setDownloadEntries] = useState<{ name: string; path: string; is_dir: boolean; size: number; modified: number }[]>([]);
@@ -93,6 +148,7 @@ function App() {
 
   // Running games state
   const [runningGames, setRunningGames] = useState<{ program_id: string; program_name: string; pid: number; exe_path: string; active: boolean; muted: boolean }[]>([]);
+  const [runningActionIndex, setRunningActionIndex] = useState(0);
 
   // Edit modal state
   const [editingProgram, setEditingProgram] = useState<Program | null>(null);
@@ -126,6 +182,9 @@ function App() {
   const cardRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
   const searchInputRef = useRef<HTMLInputElement>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const onboardingRef = useRef<HTMLDivElement>(null);
+
+  const appInteractive = !showSplash && !showOnboarding;
 
   // Persist controller mode
   useEffect(() => { localStorage.setItem("controllerMode", String(controllerMode)); }, [controllerMode]);
@@ -140,13 +199,30 @@ function App() {
     invoke<Program[]>("get_programs").then((raw) => setPrograms(normalizePrograms(raw))).catch(console.error);
   }, []);
 
+  useEffect(() => {
+    const timer = setTimeout(() => setShowSplash(false), SPLASH_DURATION_MS);
+    return () => clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!showSplash && showOnboarding) {
+      onboardingRef.current?.focus();
+    }
+  }, [showSplash, showOnboarding]);
+
   // Load IGDB credentials from backend
   useEffect(() => {
-    invoke<{ igdb_client_id: string; igdb_client_secret: string }>("get_settings").then((s) => {
+    invoke<AppSettings>("get_settings").then((s) => {
       if (s.igdb_client_id && s.igdb_client_secret) {
         setIgdbClientId(s.igdb_client_id);
         setIgdbClientSecret(s.igdb_client_secret);
         setIgdbConfigured(true);
+      }
+      if (typeof s.tray_mouse_speed === "number") {
+        setTrayMouseSpeed(clampTrayMouseSpeed(s.tray_mouse_speed));
+      }
+      if (typeof s.tray_mouse_enabled === "boolean") {
+        setTrayMouseEnabled(s.tray_mouse_enabled);
       }
     }).catch(console.error);
   }, []);
@@ -164,6 +240,24 @@ function App() {
     const unlisten = listen("running-games-changed", () => refreshRunningGames());
     return () => { clearInterval(interval); unlisten.then((fn) => fn()); };
   }, [refreshRunningGames]);
+
+  // Whenever backend brings launcher to front, reset controller focus to the grid.
+  useEffect(() => {
+    const unlisten = listen("launcher-shown", () => {
+      setFocusZone("grid");
+      setRunningActionIndex(0);
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<boolean>("tray-mouse-enabled-changed", (event) => {
+      const enabled = !!event.payload;
+      setTrayMouseEnabled(enabled);
+      showMessage(`Tray cursor ${enabled ? "enabled" : "disabled"}`);
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
 
   useEffect(() => {
     if (activeNav === "store" && storeGames.length === 0 && igdbConfigured) {
@@ -303,19 +397,31 @@ function App() {
   }, [programs, activeTab, searchQuery]);
 
   const totalItems = activeNav === "store" ? storeGames.length + (storeHasMore && !storeSearch.trim() ? 1 : 0) : filteredPrograms.length + 1;
+  const runningActionCount = runningGames.length * 2;
   const clamp = (val: number, max: number) => Math.max(0, Math.min(val, max - 1));
+
+  useEffect(() => {
+    if (runningActionCount === 0) {
+      setRunningActionIndex(0);
+      if (focusZone === "running") {
+        setFocusZone(activeNav === "library" ? "tabs" : "grid");
+      }
+      return;
+    }
+    setRunningActionIndex((i) => clamp(i, runningActionCount));
+  }, [runningActionCount, focusZone, activeNav]);
 
   useEffect(() => {
     requestAnimationFrame(() => {
       let el: Element | null = cardRefs.current.get(selectedIndex) ?? null;
       if (!el) {
-        el = document.querySelector(".game-card.selected, .downloads-item.zone-focused, .store-page-btn.selected");
+        el = document.querySelector(".game-card.selected, .downloads-item.zone-focused, .store-page-btn.selected, .running-chip-btn.zone-focused");
       }
       if (el) {
         el.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
       }
     });
-  }, [selectedIndex, downloadsIndex, settingsIndex, activeNav]);
+  }, [selectedIndex, downloadsIndex, settingsIndex, runningActionIndex, activeNav]);
 
   /* ── Handlers ── */
   const handleConfirm = useCallback(async () => {
@@ -551,6 +657,31 @@ function App() {
     showMessage("IGDB API connected");
   }, [setupClientId, setupClientSecret]);
 
+  const persistTrayMouseSpeed = useCallback((nextSpeed: number) => {
+    invoke<AppSettings>("save_tray_mouse_settings", { speed: nextSpeed })
+      .then((s) => {
+        if (typeof s.tray_mouse_speed === "number") {
+          setTrayMouseSpeed(clampTrayMouseSpeed(s.tray_mouse_speed));
+        }
+        if (typeof s.tray_mouse_enabled === "boolean") {
+          setTrayMouseEnabled(s.tray_mouse_enabled);
+        }
+      })
+      .catch((e) => {
+        console.error("Failed to save tray mouse speed:", e);
+      });
+  }, []);
+
+  const adjustTrayMouseSpeed = useCallback((delta: number) => {
+    setTrayMouseSpeed((prev) => {
+      const next = clampTrayMouseSpeed(prev + delta);
+      if (next !== prev) {
+        persistTrayMouseSpeed(next);
+      }
+      return next;
+    });
+  }, [persistTrayMouseSpeed]);
+
   /* ── Zone-aware navigation ── */
   // Edit modal items: 0 = name input, 1 = change cover btn (if igdb), 2 = cancel, 3 = save
   const EDIT_MODAL_ITEMS = igdbConfigured ? 4 : 3;
@@ -560,26 +691,44 @@ function App() {
       setEditFocusIndex((i) => Math.max(0, i - 1));
       return;
     }
+    if (focusZone === "running") {
+      return;
+    }
     if (activeNav === "settings") {
       setSettingsIndex((i) => Math.max(0, i - 1));
     } else if (activeNav === "downloads") {
       setDownloadsIndex((i) => Math.max(0, i - 1));
     } else if (focusZone === "grid") {
-      setSelectedIndex((i) => clamp(i - COLUMNS, totalItems));
+      setSelectedIndex((i) => {
+        if (i < COLUMNS) {
+          if (activeNav === "library") setFocusZone("tabs");
+          else if (runningGames.length > 0) setFocusZone("running");
+          return i;
+        }
+        return clamp(i - COLUMNS, totalItems);
+      });
+    } else if (focusZone === "tabs") {
+      if (runningGames.length > 0) setFocusZone("running");
     } else if (focusZone === "sidebar") {
       setSidebarIndex((i) => clamp(i - 1, NAV_ITEMS.length));
     }
-  }, [editingProgram, activeNav, focusZone, totalItems]);
+  }, [editingProgram, activeNav, focusZone, totalItems, runningGames.length]);
 
   const navigateDown = useCallback(() => {
     if (editingProgram) {
       setEditFocusIndex((i) => Math.min(EDIT_MODAL_ITEMS - 1, i + 1));
       return;
     }
+    if (focusZone === "running") {
+      setFocusZone(activeNav === "library" ? "tabs" : "sidebar");
+      return;
+    }
     if (activeNav === "settings") {
       setSettingsIndex((i) => Math.min(SETTINGS_ITEMS - 1, i + 1));
     } else if (activeNav === "downloads") {
       setDownloadsIndex((i) => Math.min(downloadEntries.length - 1, i + 1));
+    } else if (focusZone === "tabs") {
+      setFocusZone("grid");
     } else if (focusZone === "grid") {
       setSelectedIndex((i) => clamp(i + COLUMNS, totalItems));
     } else if (focusZone === "sidebar") {
@@ -588,34 +737,55 @@ function App() {
   }, [editingProgram, activeNav, focusZone, totalItems, downloadEntries.length]);
 
   const navigateLeft = useCallback(() => {
+    if (focusZone === "running") {
+      if (runningActionCount > 0) setRunningActionIndex((i) => clamp(i - 1, runningActionCount));
+      return;
+    }
     if (activeNav === "settings") {
       // Cycle theme left
       if (settingsIndex === 0) {
         const idx = THEMES.findIndex((t) => t.id === theme);
         setTheme(THEMES[(idx - 1 + THEMES.length) % THEMES.length].id);
+      } else if (settingsIndex === 2) {
+        adjustTrayMouseSpeed(-TRAY_MOUSE_SPEED_STEP);
       }
     } else if (focusZone === "grid") {
       setSelectedIndex((i) => clamp(i - 1, totalItems));
     } else if (focusZone === "tabs") {
       setTabIndex((i) => clamp(i - 1, TABS.length));
     }
-  }, [activeNav, settingsIndex, theme, focusZone, totalItems]);
+  }, [activeNav, settingsIndex, theme, focusZone, totalItems, runningActionCount, adjustTrayMouseSpeed]);
 
   const navigateRight = useCallback(() => {
+    if (focusZone === "running") {
+      if (runningActionCount > 0) setRunningActionIndex((i) => clamp(i + 1, runningActionCount));
+      return;
+    }
     if (activeNav === "settings") {
       // Cycle theme right
       if (settingsIndex === 0) {
         const idx = THEMES.findIndex((t) => t.id === theme);
         setTheme(THEMES[(idx + 1) % THEMES.length].id);
+      } else if (settingsIndex === 2) {
+        adjustTrayMouseSpeed(TRAY_MOUSE_SPEED_STEP);
       }
     } else if (focusZone === "grid") {
       setSelectedIndex((i) => clamp(i + 1, totalItems));
     } else if (focusZone === "tabs") {
       setTabIndex((i) => clamp(i + 1, TABS.length));
     }
-  }, [activeNav, settingsIndex, theme, focusZone, totalItems]);
+  }, [activeNav, settingsIndex, theme, focusZone, totalItems, runningActionCount, adjustTrayMouseSpeed]);
 
   const zoneConfirm = useCallback(() => {
+    if (focusZone === "running") {
+      const gameIndex = Math.floor(runningActionIndex / 2);
+      const actionIndex = runningActionIndex % 2; // 0 = switch/resume, 1 = close
+      const rg = runningGames[gameIndex];
+      if (!rg) return;
+      if (actionIndex === 0) handleSwitchToGame(rg.program_id);
+      else handleCloseGame(rg.program_id);
+      return;
+    }
     if (activeNav === "settings") {
       if (settingsIndex === 0) {
         // Cycle theme forward on A press
@@ -624,6 +794,8 @@ function App() {
       } else if (settingsIndex === 1) {
         setControllerMode((v) => !v);
       } else if (settingsIndex === 2) {
+        adjustTrayMouseSpeed(TRAY_MOUSE_SPEED_STEP);
+      } else if (settingsIndex === 3) {
         setSetupClientId(igdbClientId);
         setSetupClientSecret(igdbClientSecret);
         setSetupError("");
@@ -662,7 +834,7 @@ function App() {
     } else if (activeNav === "library") {
       handleConfirm();
     }
-  }, [activeNav, settingsIndex, theme, igdbClientId, igdbClientSecret, downloadsIndex, downloadEntries, storeGames, selectedIndex, addStoreGameToLibrary, focusZone, sidebarIndex, tabIndex, handleConfirm]);
+  }, [activeNav, settingsIndex, theme, igdbClientId, igdbClientSecret, downloadsIndex, downloadEntries, storeGames, selectedIndex, addStoreGameToLibrary, focusZone, sidebarIndex, tabIndex, handleConfirm, runningActionIndex, runningGames, handleSwitchToGame, handleCloseGame, adjustTrayMouseSpeed]);
 
   // LB/RB cycle sidebar nav items
   const cycleSidebarLeft = useCallback(() => {
@@ -729,11 +901,38 @@ function App() {
     onLT: cycleTabLeft,
     onRT: cycleTabRight,
     onSelect: toggleFavorite,
-  }, controllerMode);
+  }, controllerMode && appInteractive);
 
   /* ── Keyboard ── */
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
+      if (showSplash) return;
+      if (showOnboarding) {
+        switch (e.key) {
+          case "Escape":
+            e.preventDefault();
+            localStorage.setItem(ONBOARDING_STORAGE_KEY, "true");
+            setShowOnboarding(false);
+            setOnboardingStep(0);
+            break;
+          case "ArrowLeft":
+            e.preventDefault();
+            setOnboardingStep((step) => Math.max(0, step - 1));
+            break;
+          case "ArrowRight":
+          case "Enter":
+            e.preventDefault();
+            if (onboardingStep >= ONBOARDING_STEPS.length - 1) {
+              localStorage.setItem(ONBOARDING_STORAGE_KEY, "true");
+              setShowOnboarding(false);
+              setOnboardingStep(0);
+            } else {
+              setOnboardingStep((step) => Math.min(ONBOARDING_STEPS.length - 1, step + 1));
+            }
+            break;
+        }
+        return;
+      }
       if (e.key === "Escape") { if (editingProgram) closeEditModal(); return; }
       if (document.activeElement?.tagName === "INPUT") return;
 
@@ -749,7 +948,7 @@ function App() {
         case "/": e.preventDefault(); searchInputRef.current?.focus(); break;
         case "Tab": {
           e.preventDefault();
-          const zones: FocusZone[] = ["sidebar", "tabs", "grid"];
+          const zones: FocusZone[] = runningGames.length > 0 ? ["sidebar", "running", "tabs", "grid"] : ["sidebar", "tabs", "grid"];
           const idx = zones.indexOf(focusZone);
           setFocusZone(zones[e.shiftKey ? (idx - 1 + zones.length) % zones.length : (idx + 1) % zones.length]);
           break;
@@ -758,7 +957,7 @@ function App() {
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [navigateUp, navigateDown, navigateLeft, navigateRight, zoneConfirm, handleDelete, toggleFavorite, editingProgram, closeEditModal, openEditModal, filteredPrograms, selectedIndex, focusZone]);
+  }, [navigateUp, navigateDown, navigateLeft, navigateRight, zoneConfirm, handleDelete, toggleFavorite, editingProgram, closeEditModal, openEditModal, filteredPrograms, selectedIndex, focusZone, runningGames.length, showSplash, showOnboarding, onboardingStep]);
 
   // Sync tab index when activeTab changes
   useEffect(() => { setTabIndex(TABS.findIndex((t) => t.id === activeTab)); }, [activeTab]);
@@ -766,6 +965,87 @@ function App() {
 
   return (
     <div className={`app-shell ${controllerMode ? "controller-mode" : "kb-mode"}`}>
+      {showSplash && (
+        <div className="splash-screen" role="status" aria-live="polite" aria-label="Loading GameKiosk">
+          <div className="splash-card">
+            <div className="splash-logo" aria-hidden="true">
+              <img src="/icon.ico" alt="" />
+            </div>
+            <div className="splash-name">GameKiosk</div>
+            <div className="splash-subtitle">Loading your library</div>
+            <div className="splash-loading" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </div>
+          </div>
+        </div>
+      )}
+      {showOnboarding && !showSplash && (
+        <div className="onboarding-overlay" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
+          <div className="onboarding-card" ref={onboardingRef} tabIndex={-1}>
+            <div className="onboarding-progress" aria-label="Onboarding steps">
+              {ONBOARDING_STEPS.map((step, index) => (
+                <button
+                  key={step.title}
+                  className={`onboarding-dot ${index === onboardingStep ? "active" : ""}`}
+                  onClick={() => setOnboardingStep(index)}
+                  aria-label={`Go to step ${index + 1}: ${step.title}`}
+                  aria-pressed={index === onboardingStep}
+                  type="button"
+                />
+              ))}
+            </div>
+            <div className="onboarding-content">
+              <div className="onboarding-kicker">First launch guide</div>
+              <h2 id="onboarding-title">{ONBOARDING_STEPS[onboardingStep].title}</h2>
+              <p>{ONBOARDING_STEPS[onboardingStep].body}</p>
+              <ul>
+                {ONBOARDING_STEPS[onboardingStep].points.map((point) => (
+                  <li key={point}>{point}</li>
+                ))}
+              </ul>
+            </div>
+            <div className="onboarding-footer">
+              <button
+                className="modal-btn modal-btn-secondary"
+                type="button"
+                onClick={() => {
+                  localStorage.setItem(ONBOARDING_STORAGE_KEY, "true");
+                  setShowOnboarding(false);
+                  setOnboardingStep(0);
+                }}
+              >
+                Skip
+              </button>
+              <div className="onboarding-footer-spacer" />
+              <button
+                className="modal-btn modal-btn-secondary"
+                type="button"
+                onClick={() => setOnboardingStep((step) => Math.max(0, step - 1))}
+                disabled={onboardingStep === 0}
+              >
+                Back
+              </button>
+              <button
+                className="modal-btn modal-btn-primary"
+                type="button"
+                onClick={() => {
+                  if (onboardingStep >= ONBOARDING_STEPS.length - 1) {
+                    localStorage.setItem(ONBOARDING_STORAGE_KEY, "true");
+                    setShowOnboarding(false);
+                    setOnboardingStep(0);
+                  } else {
+                    setOnboardingStep((step) => Math.min(ONBOARDING_STEPS.length - 1, step + 1));
+                  }
+                }}
+              >
+                {onboardingStep >= ONBOARDING_STEPS.length - 1 ? "Get started" : "Next"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{message}</div>
       {message && <div className="toast" role="alert">{message}</div>}
 
@@ -830,21 +1110,23 @@ function App() {
 
         {/* Running Games Bar */}
         {runningGames.length > 0 && (
-          <div className="running-bar" role="region" aria-label="Running games">
+          <div className={`running-bar ${focusZone === "running" ? "zone-active" : ""}`} role="region" aria-label="Running games">
             <span className="running-bar-label">RUNNING</span>
             <div className="running-bar-games">
-              {runningGames.map((rg) => (
+              {runningGames.map((rg, gameIdx) => (
                 <div key={rg.program_id} className={`running-chip ${rg.active ? "active" : "muted"}`}>
                   <span className="running-chip-dot" />
                   <span className="running-chip-name">{rg.program_name}</span>
                   <button
-                    className="running-chip-btn"
+                    className={`running-chip-btn ${focusZone === "running" && runningActionIndex === (gameIdx * 2) ? "zone-focused" : ""}`}
+                    onMouseEnter={() => { setFocusZone("running"); setRunningActionIndex(gameIdx * 2); }}
                     onClick={() => handleSwitchToGame(rg.program_id)}
                     title="Switch to game"
                     aria-label={`Switch to ${rg.program_name}`}
                   >{rg.active ? "▶" : "⏯"}</button>
                   <button
-                    className="running-chip-btn running-chip-close"
+                    className={`running-chip-btn running-chip-close ${focusZone === "running" && runningActionIndex === (gameIdx * 2 + 1) ? "zone-focused" : ""}`}
+                    onMouseEnter={() => { setFocusZone("running"); setRunningActionIndex(gameIdx * 2 + 1); }}
                     onClick={() => handleCloseGame(rg.program_id)}
                     title="Close game"
                     aria-label={`Close ${rg.program_name}`}
@@ -1088,6 +1370,23 @@ function App() {
                 <small>Optimizes UI for gamepad navigation with LB/RB zone switching</small>
               </div>
               <div className={`setting-row ${controllerMode && settingsIndex === 2 ? "zone-focused" : ""}`}>
+                <label>Tray Cursor Speed</label>
+                <div className="setting-inline-controls">
+                  <button
+                    className="modal-btn modal-btn-secondary speed-btn"
+                    onClick={() => adjustTrayMouseSpeed(-TRAY_MOUSE_SPEED_STEP)}
+                    aria-label="Decrease tray cursor speed"
+                  >-</button>
+                  <span className="speed-readout">{Math.round(trayMouseSpeed * 100)}%</span>
+                  <button
+                    className="modal-btn modal-btn-secondary speed-btn"
+                    onClick={() => adjustTrayMouseSpeed(TRAY_MOUSE_SPEED_STEP)}
+                    aria-label="Increase tray cursor speed"
+                  >+</button>
+                </div>
+                <small>Use Left/Right to adjust speed. Press START anytime to toggle tray cursor ({trayMouseEnabled ? "ON" : "OFF"}).</small>
+              </div>
+              <div className={`setting-row ${controllerMode && settingsIndex === 3 ? "zone-focused" : ""}`}>
                 <label>IGDB API</label>
                 {igdbConfigured ? (
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -1107,7 +1406,7 @@ function App() {
                 )}
                 <small>Required for cover art and store browsing. Free at dev.twitch.tv</small>
               </div>
-              <div className={`setting-row ${controllerMode && settingsIndex === 3 ? "zone-focused" : ""}`}>
+              <div className={`setting-row ${controllerMode && settingsIndex === 4 ? "zone-focused" : ""}`}>
                 <label>Library Stats</label>
                 <div className="settings-stats">
                   <div className="settings-stat">
@@ -1123,6 +1422,22 @@ function App() {
                     <span className="settings-stat-label">Favorites</span>
                   </div>
                 </div>
+              </div>
+              <div className={`setting-row ${controllerMode && settingsIndex === 5 ? "zone-focused" : ""}`}>
+                <label>Application</label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    className="modal-btn modal-btn-secondary"
+                    style={{ padding: "8px 16px", fontSize: 12 }}
+                    onClick={() => invoke("hide_launcher")}
+                  >Minimize to Tray</button>
+                  <button
+                    className="modal-btn modal-btn-secondary"
+                    style={{ padding: "8px 16px", fontSize: 12, color: "#f87171" }}
+                    onClick={() => invoke("quit_app")}
+                  >Quit</button>
+                </div>
+                <small>Minimize hides to system tray. Click tray icon to restore.</small>
               </div>
             </div>
           </div>

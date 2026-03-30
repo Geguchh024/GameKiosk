@@ -46,6 +46,7 @@ export function useGamepad(actions: GamepadActions, enabled = true) {
   useEffect(() => {
     if (!enabled) return;
     const unlisten = listen<string>("gamepad-button", (event) => {
+      if (document.visibilityState !== "visible") return;
       tauriButtons.current.add(event.payload);
       dispatch(actionsRef.current, event.payload);
     });
@@ -59,7 +60,7 @@ export function useGamepad(actions: GamepadActions, enabled = true) {
   const axisDeadzone = 0.5;
 
   // Map browser button index to our event name
-  // Note: Start button (index 9) is intentionally excluded - Rust handles it for overlay toggle
+  // Note: Home/Guide is handled by Rust (gilrs Button::Mode), so button index 9 is excluded here.
   const BTN_MAP: [number, string][] = [
     [0, "A"], [1, "B"], [2, "X"], [3, "Y"],
     [4, "LB"], [5, "RB"], [6, "LT"], [7, "RT"],
@@ -68,6 +69,7 @@ export function useGamepad(actions: GamepadActions, enabled = true) {
   ];
 
   const poll = useCallback(() => {
+    if (document.visibilityState !== "visible") return;
     const gamepads = navigator.getGamepads();
     const gp = gamepads[0];
     if (!gp) return;
