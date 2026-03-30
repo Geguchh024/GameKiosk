@@ -50,6 +50,7 @@ type OnboardingStep = {
 const COLUMNS = 4;
 const SPLASH_DURATION_MS = 1600;
 const ONBOARDING_STORAGE_KEY = "gamekiosk.onboardingComplete";
+const CONTROLLER_WARNING_STORAGE_KEY = "gamekiosk.controllerKeyWarningDismissed";
 
 const COVER_GRADIENTS = [
   "linear-gradient(135deg, #1a1a2e, #2d2d44)",
@@ -136,10 +137,13 @@ function App() {
   const [focusZone, setFocusZone] = useState<FocusZone>("grid");
   const [sidebarIndex, setSidebarIndex] = useState(0);
   const [tabIndex, setTabIndex] = useState(0);
+  const [showControllerWarning, setShowControllerWarning] = useState(false);
 
   // Settings controller navigation
   const [settingsIndex, setSettingsIndex] = useState(0);
+  const [appActionIndex, setAppActionIndex] = useState(0);
   const SETTINGS_ITEMS = 6; // Theme, Controller Mode, Tray Cursor Speed, IGDB API, Library Stats, Application
+  const SETTINGS_APP_ACTIONS = 2; // Minimize to Tray, Quit
 
   // Downloads state
   const [downloadEntries, setDownloadEntries] = useState<{ name: string; path: string; is_dir: boolean; size: number; modified: number }[]>([]);
@@ -209,6 +213,15 @@ function App() {
       onboardingRef.current?.focus();
     }
   }, [showSplash, showOnboarding]);
+
+  useEffect(() => {
+    if (!showSplash && !showOnboarding && controllerMode && localStorage.getItem(CONTROLLER_WARNING_STORAGE_KEY) !== "true") {
+      setShowControllerWarning(true);
+    }
+    if (!controllerMode) {
+      setShowControllerWarning(false);
+    }
+  }, [controllerMode, showSplash, showOnboarding]);
 
   // Load IGDB credentials from backend
   useEffect(() => {
@@ -372,6 +385,11 @@ function App() {
     toastTimerRef.current = setTimeout(() => setMessage(""), 3000);
   };
 
+  const dismissControllerWarning = useCallback(() => {
+    localStorage.setItem(CONTROLLER_WARNING_STORAGE_KEY, "true");
+    setShowControllerWarning(false);
+  }, []);
+
   const handleSwitchToGame = useCallback(async (programId: string) => {
     try {
       const updated = await invoke<RunningGame[]>("switch_to_game", { programId });
@@ -425,6 +443,7 @@ function App() {
 
   /* ── Handlers ── */
   const handleConfirm = useCallback(async () => {
+    if (showControllerWarning) return;
     if (selectedIndex === filteredPrograms.length) { await handleAdd(); return; }
     const program = filteredPrograms[selectedIndex];
     if (program && !launching) {
@@ -435,9 +454,10 @@ function App() {
       } catch (e: any) { showMessage(`Error: ${e}`); }
       setTimeout(() => { setLaunching(false); refreshRunningGames(); }, 3000);
     }
-  }, [selectedIndex, filteredPrograms, launching, refreshRunningGames]);
+  }, [selectedIndex, filteredPrograms, launching, refreshRunningGames, showControllerWarning]);
 
   const handleAdd = useCallback(async () => {
+    if (showControllerWarning) return;
     try {
       const selected = await open({ multiple: false, filters: [{ name: "Programs", extensions: ["exe", "lnk", "bat", "cmd", "url", "appref-ms"] }, { name: "All Files", extensions: ["*"] }] });
       if (selected) {
@@ -448,9 +468,10 @@ function App() {
         showMessage(`Added ${name}`);
       }
     } catch (e: any) { showMessage(`Error adding program: ${e}`); }
-  }, []);
+  }, [showControllerWarning]);
 
   const handleDelete = useCallback(async () => {
+    if (showControllerWarning) return;
     if (selectedIndex < filteredPrograms.length) {
       const program = filteredPrograms[selectedIndex];
       const updated = await invoke<Program[]>("remove_program", { id: program.id });
@@ -458,9 +479,10 @@ function App() {
       setSelectedIndex((i) => clamp(i, updated.length + 1));
       showMessage(`Removed ${program.name}`);
     }
-  }, [selectedIndex, filteredPrograms]);
+  }, [selectedIndex, filteredPrograms, showControllerWarning]);
 
   const toggleFavorite = useCallback(() => {
+    if (showControllerWarning) return;
     if (selectedIndex < filteredPrograms.length) {
       const program = filteredPrograms[selectedIndex];
       const isFav = !program.favorite;
@@ -471,7 +493,7 @@ function App() {
       });
       showMessage(isFav ? `Added ${program.name} to favorites` : `Removed from favorites`);
     }
-  }, [selectedIndex, filteredPrograms]);
+  }, [selectedIndex, filteredPrograms, showControllerWarning]);
 
   const openEditModal = useCallback((program: Program) => {
     setEditingProgram(program);
@@ -687,6 +709,7 @@ function App() {
   const EDIT_MODAL_ITEMS = igdbConfigured ? 4 : 3;
 
   const navigateUp = useCallback(() => {
+    if (showControllerWarning) return;
     if (editingProgram) {
       setEditFocusIndex((i) => Math.max(0, i - 1));
       return;
@@ -712,9 +735,10 @@ function App() {
     } else if (focusZone === "sidebar") {
       setSidebarIndex((i) => clamp(i - 1, NAV_ITEMS.length));
     }
-  }, [editingProgram, activeNav, focusZone, totalItems, runningGames.length]);
+  }, [editingProgram, activeNav, focusZone, totalItems, runningGames.length, showControllerWarning]);
 
   const navigateDown = useCallback(() => {
+    if (showControllerWarning) return;
     if (editingProgram) {
       setEditFocusIndex((i) => Math.min(EDIT_MODAL_ITEMS - 1, i + 1));
       return;
@@ -734,9 +758,10 @@ function App() {
     } else if (focusZone === "sidebar") {
       setSidebarIndex((i) => clamp(i + 1, NAV_ITEMS.length));
     }
-  }, [editingProgram, activeNav, focusZone, totalItems, downloadEntries.length]);
+  }, [editingProgram, activeNav, focusZone, totalItems, downloadEntries.length, showControllerWarning]);
 
   const navigateLeft = useCallback(() => {
+    if (showControllerWarning) return;
     if (focusZone === "running") {
       if (runningActionCount > 0) setRunningActionIndex((i) => clamp(i - 1, runningActionCount));
       return;
@@ -748,15 +773,18 @@ function App() {
         setTheme(THEMES[(idx - 1 + THEMES.length) % THEMES.length].id);
       } else if (settingsIndex === 2) {
         adjustTrayMouseSpeed(-TRAY_MOUSE_SPEED_STEP);
+      } else if (settingsIndex === 5) {
+        setAppActionIndex((i) => (i - 1 + SETTINGS_APP_ACTIONS) % SETTINGS_APP_ACTIONS);
       }
     } else if (focusZone === "grid") {
       setSelectedIndex((i) => clamp(i - 1, totalItems));
     } else if (focusZone === "tabs") {
       setTabIndex((i) => clamp(i - 1, TABS.length));
     }
-  }, [activeNav, settingsIndex, theme, focusZone, totalItems, runningActionCount, adjustTrayMouseSpeed]);
+  }, [activeNav, settingsIndex, theme, focusZone, totalItems, runningActionCount, adjustTrayMouseSpeed, showControllerWarning]);
 
   const navigateRight = useCallback(() => {
+    if (showControllerWarning) return;
     if (focusZone === "running") {
       if (runningActionCount > 0) setRunningActionIndex((i) => clamp(i + 1, runningActionCount));
       return;
@@ -768,15 +796,21 @@ function App() {
         setTheme(THEMES[(idx + 1) % THEMES.length].id);
       } else if (settingsIndex === 2) {
         adjustTrayMouseSpeed(TRAY_MOUSE_SPEED_STEP);
+      } else if (settingsIndex === 5) {
+        setAppActionIndex((i) => (i + 1) % SETTINGS_APP_ACTIONS);
       }
     } else if (focusZone === "grid") {
       setSelectedIndex((i) => clamp(i + 1, totalItems));
     } else if (focusZone === "tabs") {
       setTabIndex((i) => clamp(i + 1, TABS.length));
     }
-  }, [activeNav, settingsIndex, theme, focusZone, totalItems, runningActionCount, adjustTrayMouseSpeed]);
+  }, [activeNav, settingsIndex, theme, focusZone, totalItems, runningActionCount, adjustTrayMouseSpeed, showControllerWarning]);
 
   const zoneConfirm = useCallback(() => {
+    if (showControllerWarning) {
+      dismissControllerWarning();
+      return;
+    }
     if (focusZone === "running") {
       const gameIndex = Math.floor(runningActionIndex / 2);
       const actionIndex = runningActionIndex % 2; // 0 = switch/resume, 1 = close
@@ -800,6 +834,12 @@ function App() {
         setSetupClientSecret(igdbClientSecret);
         setSetupError("");
         setShowApiSetup(true);
+      } else if (settingsIndex === 5) {
+        if (appActionIndex === 0) {
+          invoke("hide_launcher").catch(console.error);
+        } else {
+          invoke("quit_app").catch(console.error);
+        }
       }
       return;
     }
@@ -834,10 +874,11 @@ function App() {
     } else if (activeNav === "library") {
       handleConfirm();
     }
-  }, [activeNav, settingsIndex, theme, igdbClientId, igdbClientSecret, downloadsIndex, downloadEntries, storeGames, selectedIndex, addStoreGameToLibrary, focusZone, sidebarIndex, tabIndex, handleConfirm, runningActionIndex, runningGames, handleSwitchToGame, handleCloseGame, adjustTrayMouseSpeed]);
+  }, [activeNav, settingsIndex, appActionIndex, theme, igdbClientId, igdbClientSecret, downloadsIndex, downloadEntries, storeGames, selectedIndex, addStoreGameToLibrary, focusZone, sidebarIndex, tabIndex, handleConfirm, runningActionIndex, runningGames, handleSwitchToGame, handleCloseGame, adjustTrayMouseSpeed, showControllerWarning, dismissControllerWarning]);
 
   // LB/RB cycle sidebar nav items
   const cycleSidebarLeft = useCallback(() => {
+    if (showControllerWarning) return;
     const idx = NAV_ITEMS.findIndex((n) => n.id === activeNav);
     const newIdx = (idx - 1 + NAV_ITEMS.length) % NAV_ITEMS.length;
     const nav = NAV_ITEMS[newIdx];
@@ -845,9 +886,10 @@ function App() {
     setSidebarIndex(newIdx);
     if (nav.id === "library") setActiveTab("all");
     setSelectedIndex(0);
-  }, [activeNav]);
+  }, [activeNav, showControllerWarning]);
 
   const cycleSidebarRight = useCallback(() => {
+    if (showControllerWarning) return;
     const idx = NAV_ITEMS.findIndex((n) => n.id === activeNav);
     const newIdx = (idx + 1) % NAV_ITEMS.length;
     const nav = NAV_ITEMS[newIdx];
@@ -855,24 +897,26 @@ function App() {
     setSidebarIndex(newIdx);
     if (nav.id === "library") setActiveTab("all");
     setSelectedIndex(0);
-  }, [activeNav]);
+  }, [activeNav, showControllerWarning]);
 
   // LT/RT cycle tabs (All Games, Installed, Favorites, Recent)
   const cycleTabLeft = useCallback(() => {
+    if (showControllerWarning) return;
     const idx = TABS.findIndex((t) => t.id === activeTab);
     const newIdx = (idx - 1 + TABS.length) % TABS.length;
     setActiveTab(TABS[newIdx].id);
     setTabIndex(newIdx);
     setSelectedIndex(0);
-  }, [activeTab]);
+  }, [activeTab, showControllerWarning]);
 
   const cycleTabRight = useCallback(() => {
+    if (showControllerWarning) return;
     const idx = TABS.findIndex((t) => t.id === activeTab);
     const newIdx = (idx + 1) % TABS.length;
     setActiveTab(TABS[newIdx].id);
     setTabIndex(newIdx);
     setSelectedIndex(0);
-  }, [activeTab]);
+  }, [activeTab, showControllerWarning]);
 
   /* ── Gamepad ── */
   useGamepad({
@@ -880,7 +924,7 @@ function App() {
     onDown: navigateDown,
     onLeft: navigateLeft,
     onRight: navigateRight,
-    onConfirm: editingProgram ? () => {
+    onConfirm: showControllerWarning ? dismissControllerWarning : editingProgram ? () => {
       // 0 = name input (no-op, just focused), 1 = change cover (if igdb), 2/3 = cancel/save
       if (igdbConfigured) {
         if (editFocusIndex === 1) openImagePicker(editingProgram);
@@ -893,20 +937,27 @@ function App() {
         else saveEdit();
       }
     } : zoneConfirm,
-    onBack: editingProgram ? closeEditModal : () => setFocusZone("sidebar"),
-    onAdd: handleAdd,
-    onDelete: editingProgram ? closeEditModal : handleDelete,
-    onLB: cycleSidebarLeft,
-    onRB: cycleSidebarRight,
-    onLT: cycleTabLeft,
-    onRT: cycleTabRight,
-    onSelect: toggleFavorite,
+    onBack: showControllerWarning ? dismissControllerWarning : editingProgram ? closeEditModal : () => setFocusZone("sidebar"),
+    onAdd: showControllerWarning ? () => {} : handleAdd,
+    onDelete: showControllerWarning ? () => {} : editingProgram ? closeEditModal : handleDelete,
+    onLB: showControllerWarning ? () => {} : cycleSidebarLeft,
+    onRB: showControllerWarning ? () => {} : cycleSidebarRight,
+    onLT: showControllerWarning ? () => {} : cycleTabLeft,
+    onRT: showControllerWarning ? () => {} : cycleTabRight,
+    onSelect: showControllerWarning ? () => {} : toggleFavorite,
   }, controllerMode && appInteractive);
 
   /* ── Keyboard ── */
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (showSplash) return;
+      if (showControllerWarning) {
+        if (e.key === "Escape" || e.key === "Enter") {
+          e.preventDefault();
+          dismissControllerWarning();
+        }
+        return;
+      }
       if (showOnboarding) {
         switch (e.key) {
           case "Escape":
@@ -957,7 +1008,7 @@ function App() {
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [navigateUp, navigateDown, navigateLeft, navigateRight, zoneConfirm, handleDelete, toggleFavorite, editingProgram, closeEditModal, openEditModal, filteredPrograms, selectedIndex, focusZone, runningGames.length, showSplash, showOnboarding, onboardingStep]);
+  }, [navigateUp, navigateDown, navigateLeft, navigateRight, zoneConfirm, handleDelete, toggleFavorite, editingProgram, closeEditModal, openEditModal, filteredPrograms, selectedIndex, focusZone, runningGames.length, showSplash, showOnboarding, onboardingStep, showControllerWarning, dismissControllerWarning]);
 
   // Sync tab index when activeTab changes
   useEffect(() => { setTabIndex(TABS.findIndex((t) => t.id === activeTab)); }, [activeTab]);
@@ -1042,6 +1093,30 @@ function App() {
               >
                 {onboardingStep >= ONBOARDING_STEPS.length - 1 ? "Get started" : "Next"}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showControllerWarning && !showSplash && !showOnboarding && (
+        <div className="modal-overlay controller-warning-overlay" onClick={dismissControllerWarning} role="dialog" aria-modal="true" aria-labelledby="controller-warning-title">
+          <div className="modal controller-warning-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 id="controller-warning-title">Controller Keys Reserved</h2>
+              <button className="modal-close" onClick={dismissControllerWarning} aria-label="Close warning">âœ•</button>
+            </div>
+            <div className="modal-body controller-warning-body">
+              <div className="warning-badge" aria-hidden="true">!</div>
+              <div className="warning-copy">
+                <p>START and SELECT are taken by GameKiosk while the launcher is active.</p>
+                <p>Change those bindings in the game if you need those buttons for gameplay.</p>
+              </div>
+              <ul className="warning-list">
+                <li>START opens launcher actions such as editing and tray cursor toggles.</li>
+                <li>SELECT is reserved for launcher navigation and favorites.</li>
+              </ul>
+            </div>
+            <div className="modal-footer">
+              <button className="modal-btn modal-btn-primary" onClick={dismissControllerWarning}>Got it</button>
             </div>
           </div>
         </div>
@@ -1427,17 +1502,19 @@ function App() {
                 <label>Application</label>
                 <div style={{ display: "flex", gap: 8 }}>
                   <button
-                    className="modal-btn modal-btn-secondary"
+                    className={`modal-btn modal-btn-secondary ${controllerMode && settingsIndex === 5 && appActionIndex === 0 ? "zone-focused" : ""}`}
                     style={{ padding: "8px 16px", fontSize: 12 }}
                     onClick={() => invoke("hide_launcher")}
+                    onMouseEnter={() => setAppActionIndex(0)}
                   >Minimize to Tray</button>
                   <button
-                    className="modal-btn modal-btn-secondary"
+                    className={`modal-btn modal-btn-secondary ${controllerMode && settingsIndex === 5 && appActionIndex === 1 ? "zone-focused" : ""}`}
                     style={{ padding: "8px 16px", fontSize: 12, color: "#f87171" }}
                     onClick={() => invoke("quit_app")}
+                    onMouseEnter={() => setAppActionIndex(1)}
                   >Quit</button>
                 </div>
-                <small>Minimize hides to system tray. Click tray icon to restore.</small>
+                <small>Use Left/Right to choose Minimize or Quit, then press A. Minimize hides to system tray. Click tray icon to restore.</small>
               </div>
             </div>
           </div>
